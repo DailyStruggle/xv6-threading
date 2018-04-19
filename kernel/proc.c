@@ -130,6 +130,7 @@ growproc(int n)
   }
   
   proc->sz = sz;
+  release(&ptable.lock);
   switchuvm(proc);
   return 0;
 }
@@ -466,10 +467,25 @@ procdump(void)
 }
 
 int
-clone(void(*fcn)(void*), void *arg, void*stack)
+clone(void)
 {
+	void(*fcn)(void*);
+	void *arg;
+	void *stack;
 	int addr[2];
 	int i, pid;
+	
+	//get function pointer (argument 0)
+	if(argptr(0, (void*)&fcn, sizeof(fcn) < 0))
+		return -1;
+	//get argument pointer (argument 1)
+	if(argptr(1, (void*)&arg, sizeof(arg) < 0))
+			return -1;
+	//get stack pointer (argument 2)
+	if(argptr(2, (void*)&stack, sizeof(stack) < 0)){
+			return -1;
+	}
+	
 	
 	struct proc *np;
 	
@@ -514,44 +530,45 @@ clone(void(*fcn)(void*), void *arg, void*stack)
 	return pid;
 }
 
-int 
-join(void **stack)
+int
+join(void)
 {
-	int threads;
-	int pid;
-	
-	if(proc->sz-(uint)stack<sizeof(void**))
-		return -1;
-	
-	struct proc *p;
-	
-	acquire(&ptable.lock);
-	for(;;){
-		threads = 0;
-		for(p = ptable.proc; p< &ptable.proc[NPROC]; p++){
-			if(p->pgdir != proc->pgdir)
-				continue;
-			if(p->parent != proc)
-				continue;
-			threads = 1;
-			
-			if(p->state == ZOMBIE){
-				pid = p->pid;
-				p->state = UNUSED;
-				p->pid = 0;
-				p->parent = 0;
-				p->name[0] = 0;
-				p->killed = 0;
-				*((int*)((int*)stack))=p->tstack;
-				release(&ptable.lock);
-				return pid;
-			}
-		}
-		
-		if(!threads || proc->killed){
-			release(&ptable.lock);
+  void **stack;
+  if(argptr(0, (void*)&stack, sizeof(stack) < 0))
 			return -1;
-		}
-		sleep(proc, &ptable.lock);
-	}
+  if((proc->sz-(uint)stack)< sizeof(void**))
+	  return -1;
+  struct proc *p;
+  int havethreads, pid;
+
+  acquire(&ptable.lock);
+  for(;;){
+    // Scan through table looking for zombie threads.
+	havethreads = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->pgdir != proc->pgdir )
+        continue;
+      if(p->parent != proc )
+              continue;
+	  havethreads = 1;
+
+      if(p->state == ZOMBIE ){
+    	pid = p->pid;
+        p->state = UNUSED;
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+        *((int*)((int*)stack))=p->tstack;
+        release(&ptable.lock);
+        return pid;
+      }
+    }
+
+    if(!havethreads || proc->killed){
+      release(&ptable.lock);
+      return -1;
+    }
+    sleep(proc, &ptable.lock);  
+  }
 }
