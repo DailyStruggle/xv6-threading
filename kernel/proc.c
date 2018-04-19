@@ -108,14 +108,27 @@ growproc(int n)
 {
   uint sz;
   
+  struct proc *p;
+  acquire(&ptable.lock);
+  
   sz = proc->sz;
   if(n > 0){
-    if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0)
-      return -1;
+    if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0){
+      release(&ptable.lock);
+	  return -1;
+	}
   } else if(n < 0){
-    if((sz = deallocuvm(proc->pgdir, sz, sz + n)) == 0)
-      return -1;
+    if((sz = deallocuvm(proc->pgdir, sz, sz + n)) == 0){
+      release(&ptable.lock);
+	  return -1;
+	}
   }
+  //grow threads
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      	if(p->pgdir == proc->pgdir )
+			p->sz=sz;
+  }
+  
   proc->sz = sz;
   switchuvm(proc);
   return 0;
@@ -190,9 +203,15 @@ exit(void)
   // Pass abandoned children to init.
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->parent == proc){
-      p->parent = initproc;
-      if(p->state == ZOMBIE)
-        wakeup1(initproc);
+		if(p->pgdir != proc->pgdir){
+			p->parent = initproc;
+			if(p->state == ZOMBIE)
+				wakeup1(initproc);
+		}
+		else{
+			p->parent=0;
+			p->state=ZOMBIE;
+		}
     }
   }
 
@@ -209,22 +228,25 @@ wait(void)
 {
   struct proc *p;
   int havekids, pid;
-
+  
   acquire(&ptable.lock);
   for(;;){
     // Scan through table looking for zombie children.
     havekids = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->parent != proc)
+      if(p->parent != proc || p->pgdir != proc->pgdir)
         continue;
-      havekids = 1;
+      //skip if zombie parent process
+	  if(p->pgdir == proc->pgdir && p->pid==0 && p->state==ZOMBIE)
+		  continue;
+	  havekids = 1;
       if(p->state == ZOMBIE){
         // Found one.
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
         freevm(p->pgdir);
-        p->state = UNUSED;
+		p->state = UNUSED;
         p->pid = 0;
         p->parent = 0;
         p->name[0] = 0;
@@ -443,4 +465,93 @@ procdump(void)
   }
 }
 
+int
+clone(void(*fcn)(void*), void *arg, void*stack)
+{
+	int addr[2];
+	int i, pid;
+	
+	struct proc *np;
+	
+	//if stack is weird size
+	if((uint)stack%PGSIZE!=0)
+		return -1;
+	
+	//if process is weird size
+	if((proc->sz - (uint)stack) < PGSIZE)
+		return -1;
+	
+	//initialize new process
+	if((np = allocproc()) == 0)
+		return -1;
+	
+	//copy process state
+	np->pgdir = proc->pgdir;
+	np->sz = proc->sz;
+	np->parent = proc;
+	*np->tf = *proc->tf;
+	np->tf->esp = (uint)stack+PGSIZE;
+	copyout(np->pgdir, np->tf->esp, addr, (2)*4);
 
+	
+	np->tstack = (uint)stack;
+	addr[0] = 0xffffffff;
+	addr[1] = (uint)arg;
+	
+	np->tf->esp -= (2)*4;
+	np->tf->eax = 0;
+	np->tf->eip = (uint)fcn;
+	np->tf->ebp = np->tf->esp;
+	
+	for(i = 0; i < NOFILE; i++)
+		if(proc->ofile[i])
+			np->ofile[i] = filedup(proc->ofile[i]);
+	
+	
+	pid = np->pid;
+	np->state = RUNNABLE;
+	safestrcpy(np->name,proc->name,sizeof(proc->name));
+	return pid;
+}
+
+int 
+join(void **stack)
+{
+	int threads;
+	int pid;
+	
+	if(proc->sz-(uint)stack<sizeof(void**))
+		return -1;
+	
+	struct proc *p;
+	
+	acquire(&ptable.lock);
+	for(;;){
+		threads = 0;
+		for(p = ptable.proc; p< &ptable.proc[NPROC]; p++){
+			if(p->pgdir != proc->pgdir)
+				continue;
+			if(p->parent != proc)
+				continue;
+			threads = 1;
+			
+			if(p->state == ZOMBIE){
+				pid = p->pid;
+				p->state = UNUSED;
+				p->pid = 0;
+				p->parent = 0;
+				p->name[0] = 0;
+				p->killed = 0;
+				*((int*)((int*)stack))=p->tstack;
+				release(&ptable.lock);
+				return pid;
+			}
+		}
+		
+		if(!threads || proc->killed){
+			release(&ptable.lock);
+			return -1;
+		}
+		sleep(proc, &ptable.lock);
+	}
+}
