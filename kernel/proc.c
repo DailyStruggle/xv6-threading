@@ -16,7 +16,6 @@ static struct proc *initproc;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
-
 static void wakeup1(void *chan);
 
 void
@@ -125,8 +124,9 @@ growproc(int n)
   }
   //grow threads
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      	if(p->pgdir == proc->pgdir )
-			p->sz=sz;
+      	if(p->pgdir != proc->pgdir )
+        	continue;
+        p->sz=sz;
   }
   
   proc->sz = sz;
@@ -235,7 +235,7 @@ wait(void)
     // Scan through table looking for zombie children.
     havekids = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->parent != proc || p->pgdir != proc->pgdir)
+      if(p->parent != proc)
         continue;
       //skip if zombie parent process
 	  if(p->pgdir == proc->pgdir && p->pid==0 && p->state==ZOMBIE)
